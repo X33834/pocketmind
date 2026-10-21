@@ -751,6 +751,17 @@ def create_app() -> FastAPI:
         await store.touch_session(sid, title)
         return {"ok": True, "title": title}
 
+    @app.get("/api/sessions/search", dependencies=[Depends(check_token)])
+    async def search_messages(q: str = "", limit: int = 20):
+        """跨会话搜索消息正文（会话抽屉搜索框升级：标题 + 正文都能搜）。"""
+        if store is None:
+            raise HTTPException(503)
+        query = (q or "").strip()
+        if not query:
+            return {"query": "", "items": []}
+        items = await store.search_messages(query, limit=limit)
+        return {"query": query, "count": len(items), "items": items}
+
     @app.get("/api/sessions", dependencies=[Depends(check_token)])
     async def list_sessions():
         if store is None:
@@ -796,6 +807,22 @@ def create_app() -> FastAPI:
         if await store.get_session(sid) is None:
             raise HTTPException(404, "会话不存在")
         return await store.get_messages(sid)
+
+    @app.delete("/api/sessions/{sid}/messages/{mid}", dependencies=[Depends(check_token)])
+    async def truncate_messages(sid: str, mid: int):
+        """从 mid 起截断该会话历史（编辑重发 / 重新生成共用）。
+
+        语义上等价于「把对话回退到这条消息之前」：该条及其后续全部删除，
+        保证 user/assistant/tool 配对完整（删单条会留下孤立 tool 响应）。
+        """
+        if store is None:
+            raise HTTPException(503)
+        if await store.get_session(sid) is None:
+            raise HTTPException(404, "会话不存在")
+        # 正在跑的时候截断会把在途轮次写回已删区间，先停掉
+        cancel_run(sid)
+        removed = await store.delete_messages_from(sid, mid)
+        return {"ok": True, "removed": removed}
 
     @app.get("/api/sessions/{sid}/todos", dependencies=[Depends(check_token)])
     async def session_todos(sid: str):
@@ -1001,6 +1028,23 @@ def create_app() -> FastAPI:
                     await client.close()
                 except Exception:
                     pass
+
+    @app.get("/api/diagnostics", dependencies=[Depends(check_token)])
+    async def diagnostics_endpoint():
+        """环境自检：Python / 数据目录 / 磁盘 / 端口 / 外网 / termux-api / 模型 / 可选依赖。
+
+        只读探测 + 可执行建议，不自动修改任何东西——自愈动作（删文件、改权限、装包）
+        必须由用户确认，静默改动比报错更危险。
+        """
+        from .diagnostics import run_diagnostics
+
+        return run_diagnostics(
+            settings_mgr,
+            MOCK,
+            host=settings_mgr.data.get("server", {}).get("host", "127.0.0.1"),
+            port=int(settings_mgr.data.get("server", {}).get("port", 8787) or 8787),
+            data_dir=settings_mgr.path.parent,
+        )
 
     @app.get("/api/stats", dependencies=[Depends(check_token)])
     async def stats():

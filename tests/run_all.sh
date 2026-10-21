@@ -6,6 +6,7 @@
 #   bash tests/run_all.sh --frontend   # 只跑前端
 #   bash tests/run_all.sh --fresh      # 强制 npm ci 重装前端依赖
 #   bash tests/run_all.sh --with-e2e   # 追加 Playwright E2E（需先装浏览器）
+#   bash tests/run_all.sh --allow-dirty-dist  # 提交前自检：dist 允许有未提交改动
 #
 # 退出码：0 = 请求的检查全部通过；1 = 有失败项；2 = 环境不满足（缺依赖/参数错误）。
 # 数据隔离：门禁只用自己的临时 AGENT_HOME，绝不读取、更不会删除外层 shell 里的同名变量。
@@ -18,6 +19,7 @@ RUN_BACKEND=1
 RUN_FRONTEND=1
 FORCE_INSTALL=0
 WITH_E2E=0
+ALLOW_DIRTY_DIST=0
 MODE_SEEN=""
 for arg in "$@"; do
   case "$arg" in
@@ -28,7 +30,9 @@ for arg in "$@"; do
       MODE_SEEN="$arg" ;;
     --fresh) FORCE_INSTALL=1 ;;
     --with-e2e) WITH_E2E=1 ;;
-    -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
+    # 提交前自检：dist 允许有未提交改动（改完源码、build 完、还没 commit 是正常状态）。
+    --allow-dirty-dist) ALLOW_DIRTY_DIST=1 ;;
+    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
     *) echo "未知参数：$arg（-h 查看用法）" >&2; exit 2 ;;
   esac
 done
@@ -128,6 +132,7 @@ if [ "$RUN_BACKEND" = 1 ]; then
 
   step "compileall：全部模块可编译" "$PY" -m compileall -q agentd/ tests/ smoke/
   step "ruff：静态检查" "$PY" -m ruff check agentd/ tests/ smoke/
+  step "p9 无障碍：主题文字对比度 ≥ 4.5:1" run_py smoke/p9_a11y_contrast_test.py
 
   # 不依赖服务的套件先跑，失败也不会挡住后面起服务
   step "p0 回归（重启恢复 / \$HOME 展开 / FTS 排除）" run_py smoke/p0_regression_test.py
@@ -221,7 +226,7 @@ PY
 
   if [ "$PORTS_TODO" = 1 ]; then
     for name in "m5 回归" "p0 并发排队" "p1 定时任务" "p2 Plan/Act + Recipe" \
-                "p3 健壮性 API" "p5 前端契约"; do
+                "p3 健壮性 API" "p5 前端契约" "p8 消息级操作"; do
       fail "${name}（服务/桩未就绪，未执行）"
     done
   fi
@@ -248,8 +253,10 @@ if [ "$RUN_FRONTEND" = 1 ]; then
         echo "✗ 当前目录不是 git 仓库，无法校验 dist 新鲜度" >&2
         return 1
       fi
-      if [ -n "$(git -C "$ROOT" status --porcelain -- agentd/web/dist)" ]; then
-        echo "✗ dist/ 与 src 构建产物不一致：请重新 build 并提交" >&2
+      if [ "$ALLOW_DIRTY_DIST" = 1 ]; then
+        echo "--- dist 允许未提交（--allow-dirty-dist）"
+      elif [ -n "$(git -C "$ROOT" status --porcelain -- agentd/web/dist)" ]; then
+        echo "✗ dist/ 与 src 构建产物不一致：请重新 build 并提交（提交前自检可加 --allow-dirty-dist）" >&2
         git -C "$ROOT" status --porcelain -- agentd/web/dist >&2
         return 1
       fi

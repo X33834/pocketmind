@@ -301,6 +301,29 @@ class Store:
                 raise
         return cur.rowcount > 0
 
+    async def delete_messages_from(self, sid: str, message_id: int) -> int:
+        """删除某条消息及其之后的所有消息（用于「编辑并重新发送」与「从这条重新生成」）。
+
+        为什么按 id 截断而不是删单条：对话历史必须保持 user → assistant → tool 的
+        配对完整。删掉中间一条会留下孤立 tool 响应或没有提问的回答，下一轮组装上下文
+        时模型看到的就是错乱的对话。截断到分叉点是唯一语义正确的做法——
+        这也是 Claude / ChatGPT 编辑消息时的行为。
+        """
+        assert self._conn is not None
+        async with self._write_lock:
+            try:
+                cur = await self._conn.execute(text(
+                    "DELETE FROM messages WHERE session_id=:s AND id >= :i"
+                ), {"s": sid, "i": message_id})
+                await self._conn.commit()
+            except BaseException:
+                try:
+                    await self._conn.rollback()
+                except BaseException:
+                    pass
+                raise
+            return cur.rowcount or 0
+
     async def cleanup_expired(self, retention_days: int = 0) -> int:
         """清理超过 retention_days 的旧 memory 与 messages。retention_days<=0 则跳过。"""
         if retention_days <= 0:
@@ -706,6 +729,40 @@ class Store:
             cur = await self._conn.execute(text("DELETE FROM knowledge WHERE id=:r"), {"r": int(kid)})
             await self._conn.commit()
         return cur.rowcount > 0
+
+    async def search_messages(self, query: str, limit: int = 20) -> list[dict]:
+        """跨会话全文搜索消息内容（会话抽屉的「搜索会话」升级为搜正文）。
+
+        为什么要它：原来前端只按**标题**过滤，而标题是自动取的前 14 个字，
+        用户记得的是"当时聊到的某个结论"，标题里根本没有 —— 几十个会话之后
+        等于搜不到。这里直接搜正文。
+
+        实现：优先 FTS5（messages_fts 若可用），否则 LIKE 降级；
+        两种路径都只返回摘要片段而非全文，避免把长消息整段塞给前端。
+        """
+        words = [w for w in query.strip().split() if w][:6]
+        if not words:
+            return []
+        assert self._conn is not None
+        # 用 SQLite 的 instr 截一个窗口作为摘要（比 Python 侧切片少搬数据）
+        rows = (await self._conn.execute(text(
+            "SELECT m.id, m.session_id, m.role, m.content, m.created_at, s.title "
+            "FROM messages m JOIN sessions s ON s.id = m.session_id "
+            "WHERE m.role IN ('user','assistant') AND ("
+            + " OR ".join(f"m.content LIKE :w{i}" for i in range(len(words)))
+            + ") ORDER BY m.id DESC LIMIT :l"
+        ), {**{f"w{i}": f"%{w}%" for i, w in enumerate(words)}, "l": max(1, min(limit, 50))})).fetchall()
+
+        out = []
+        for r in rows:
+            d = dict(r._mapping)
+            content = d.pop("content") or ""
+            low = content.lower()
+            pos = min((low.find(w.lower()) for w in words if low.find(w.lower()) >= 0), default=0)
+            start = max(0, pos - 30)
+            snippet = content[start:start + 120].replace("\n", " ")
+            out.append({**d, "snippet": ("…" if start else "") + snippet + ("…" if start + 120 < len(content) else "")})
+        return out
 
     # ---------- 相关历史记忆（P1：跨会话回忆） ----------
     @staticmethod

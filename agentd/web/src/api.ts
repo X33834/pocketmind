@@ -30,10 +30,29 @@ export interface Session {
 }
 
 export interface StoredMessage {
+  /** 后端 messages 表主键；用于「编辑重发 / 重新生成」时按 id 截断历史 */
+  id: number;
   role: "user" | "assistant" | "tool" | "system";
   content: string;
   meta: Record<string, unknown>;
   created_at?: number;
+}
+
+export interface MessageHit {
+  id: number;
+  session_id: string;
+  title: string;
+  role: "user" | "assistant";
+  snippet: string;
+  created_at?: number;
+}
+
+/** 跨会话搜索消息正文（标题里没有的内容也能搜到）。 */
+export async function searchMessages(q: string): Promise<MessageHit[]> {
+  const r = await api.get<{ items: MessageHit[] }>(
+    `/api/sessions/search?q=${encodeURIComponent(q)}`
+  );
+  return r.items ?? [];
 }
 
 export interface Provider {
