@@ -17,7 +17,7 @@ aiosqlite>=0.19
 # fastapi 传递依赖：python-multipart 0.0.20 有多个 CVE（PYSEC-2026-*），这里显式抬地板
 python-multipart>=0.0.31
 # 全局限流（main.py 的 create_app 无条件挂载 rate_limit 中间件）
-slowapi>=0.1.9
+slowapi>=0.1.10
 # OpenTelemetry 可观测性（main.py 的 create_app 无条件调用 setup_telemetry）
 opentelemetry-sdk>=1.24
 # 注意：instrumentation 系列用的是独立的 0.x beta 版本线，发布号形如 0.46b0 / 0.66b1。
